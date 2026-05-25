@@ -17,14 +17,19 @@ import {
   IncomingCallPayload,
 } from "@/types/call";
 import {
+  attachLocalTracks,
   createPeerConnection,
   generateRoomId,
-  getLocalMedia,
   getDisplayMedia,
+  getLocalMedia,
   getMediaErrorMessage,
+  getOrCreateRemoteStream,
   getParticipantIds,
+  normalizeUserId,
+  shouldInitiateOffer,
 } from "@/lib/webrtc";
 import { toast } from "sonner";
+import type { Socket } from "socket.io-client";
 
 interface CallContextType {
   status: CallStatus;
@@ -42,7 +47,7 @@ interface CallContextType {
   isLoadingMedia: boolean;
   permissionError: string | null;
   statusMessage: string;
-  startCall: (conversation: any, type: CallType, displayName: string) => Promise<void>;
+  startCall: (conversation: unknown, type: CallType, displayName: string) => Promise<void>;
   acceptCall: () => Promise<void>;
   rejectCall: () => void;
   endCall: () => void;
@@ -50,7 +55,7 @@ interface CallContextType {
   toggleVideo: () => void;
   toggleSpeaker: () => void;
   toggleScreenShare: () => Promise<void>;
-  joinRoom: (roomId: string, conversationId: string, callType: CallType, displayName: string) => Promise<void>;
+  joinRoom: (roomId: string, conversationId: string, type: CallType, displayName: string) => Promise<void>;
 }
 
 const CallContext = createContext<CallContextType | undefined>(undefined);
@@ -68,7 +73,6 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
   const [status, setStatus] = useState<CallStatus>("idle");
   const [callType, setCallType] = useState<CallType>("video");
   const [roomId, setRoomId] = useState<string | null>(null);
-  const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversationName, setConversationName] = useState("");
   const [isIncoming, setIsIncoming] = useState(false);
   const [incomingCall, setIncomingCall] = useState<IncomingCallPayload | null>(null);
@@ -83,48 +87,59 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
   const [statusMessage, setStatusMessage] = useState("");
 
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const remoteStreamsRef = useRef<Map<string, MediaStream>>(new Map());
   const pendingCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
+  const makingOfferRef = useRef<Set<string>>(new Set());
   const localStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
-  const isCallerRef = useRef(false);
   const roomIdRef = useRef<string | null>(null);
+  const callTypeRef = useRef<CallType>("video");
+  const statusRef = useRef<CallStatus>("idle");
+  const socketRef = useRef<Socket | null>(null);
 
-  const authUserId = authUser?._id ? String(authUser._id) : "";
+  const authUserId = normalizeUserId(authUser?._id);
   const authUserName = authUser?.name || "You";
 
-  const updateParticipantStream = useCallback(
-    (userId: string, stream: MediaStream | undefined) => {
-      setParticipants((prev) =>
-        prev.map((p) => (p.userId === userId ? { ...p, stream } : p))
-      );
-    },
-    []
-  );
+  statusRef.current = status;
+  socketRef.current = socket;
+  callTypeRef.current = callType;
 
   const addOrUpdateParticipant = useCallback(
     (userId: string, name: string, stream?: MediaStream) => {
+      const uid = normalizeUserId(userId);
       setParticipants((prev) => {
-        const exists = prev.find((p) => p.userId === userId);
+        const exists = prev.find((p) => p.userId === uid);
         if (exists) {
           return prev.map((p) =>
-            p.userId === userId ? { ...p, name, stream: stream ?? p.stream } : p
+            p.userId === uid ? { ...p, name, stream: stream ?? p.stream } : p
           );
         }
-        return [...prev, { userId, name, stream, isMuted: false, isVideoOff: false }];
+        return [...prev, { userId: uid, name, stream, isMuted: false, isVideoOff: false }];
       });
     },
     []
   );
 
+  const updateParticipantStream = useCallback((userId: string, stream: MediaStream) => {
+    const uid = normalizeUserId(userId);
+    remoteStreamsRef.current.set(uid, stream);
+    setParticipants((prev) =>
+      prev.map((p) => (p.userId === uid ? { ...p, stream } : p))
+    );
+  }, []);
+
   const removeParticipant = useCallback((userId: string) => {
-    setParticipants((prev) => prev.filter((p) => p.userId !== userId));
-    const pc = peerConnectionsRef.current.get(userId);
+    const uid = normalizeUserId(userId);
+    setParticipants((prev) => prev.filter((p) => p.userId !== uid));
+    const pc = peerConnectionsRef.current.get(uid);
     if (pc) {
       pc.close();
-      peerConnectionsRef.current.delete(userId);
+      peerConnectionsRef.current.delete(uid);
     }
-    pendingCandidatesRef.current.delete(userId);
+    remoteStreamsRef.current.delete(uid);
+    pendingCandidatesRef.current.delete(uid);
+    makingOfferRef.current.delete(uid);
   }, []);
 
   const stopAllMedia = useCallback(() => {
@@ -141,16 +156,18 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
   const closeAllPeers = useCallback(() => {
     peerConnectionsRef.current.forEach((pc) => pc.close());
     peerConnectionsRef.current.clear();
+    remoteStreamsRef.current.clear();
     pendingCandidatesRef.current.clear();
+    makingOfferRef.current.clear();
   }, []);
 
   const resetCall = useCallback(() => {
     closeAllPeers();
     stopAllMedia();
     setStatus("idle");
+    statusRef.current = "idle";
     setRoomId(null);
     roomIdRef.current = null;
-    setConversationId(null);
     setConversationName("");
     setIsIncoming(false);
     setIncomingCall(null);
@@ -161,127 +178,169 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
     setPermissionError(null);
     setStatusMessage("");
     setIsLoadingMedia(false);
-    isCallerRef.current = false;
   }, [closeAllPeers, stopAllMedia]);
 
   const flushPendingCandidates = useCallback(async (remoteUserId: string, pc: RTCPeerConnection) => {
-    const pending = pendingCandidatesRef.current.get(remoteUserId) || [];
+    const uid = normalizeUserId(remoteUserId);
+    const pending = pendingCandidatesRef.current.get(uid) || [];
     for (const candidate of pending) {
-      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (e) {
+        console.warn("ICE candidate error:", e);
+      }
     }
-    pendingCandidatesRef.current.delete(remoteUserId);
+    pendingCandidatesRef.current.delete(uid);
   }, []);
 
-  const createOfferForPeer = useCallback(
-    async (remoteUserId: string) => {
-      if (!socket || !roomIdRef.current || remoteUserId === authUserId) return;
-      if (peerConnectionsRef.current.has(remoteUserId)) return;
+  const setupPeerConnection = useCallback(
+    (remoteUserId: string) => {
+      const uid = normalizeUserId(remoteUserId);
+      let pc = peerConnectionsRef.current.get(uid);
+      if (pc) return pc;
 
-      const pc = createPeerConnection();
-      peerConnectionsRef.current.set(remoteUserId, pc);
+      pc = createPeerConnection();
+      peerConnectionsRef.current.set(uid, pc);
 
-      const stream = localStreamRef.current;
-      if (stream) {
-        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-      }
+      attachLocalTracks(pc, localStreamRef.current);
 
       pc.ontrack = (event) => {
-        const [remoteStream] = event.streams;
-        if (remoteStream) updateParticipantStream(remoteUserId, remoteStream);
+        const stream = getOrCreateRemoteStream(remoteStreamsRef.current, uid, event);
+        updateParticipantStream(uid, stream);
+        setStatus("connected");
+        statusRef.current = "connected";
+        setStatusMessage("Connected");
       };
 
       pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          socket.emit("webrtc:ice-candidate", {
-            roomId: roomIdRef.current,
-            toUserId: remoteUserId,
-            fromUserId: authUserId,
-            candidate: event.candidate,
-          });
-        }
+        if (!event.candidate || !socketRef.current || !roomIdRef.current) return;
+        socketRef.current.emit("webrtc:ice-candidate", {
+          roomId: roomIdRef.current,
+          toUserId: uid,
+          fromUserId: authUserId,
+          candidate: event.candidate.toJSON(),
+        });
       };
 
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
-          removeParticipant(remoteUserId);
+        if (pc!.connectionState === "failed") {
+          try {
+            pc!.restartIce();
+          } catch {
+            removeParticipant(uid);
+            setStatusMessage("Connection failed");
+          }
+        } else if (pc!.connectionState === "disconnected") {
+          removeParticipant(uid);
           setStatusMessage("User disconnected");
         }
       };
 
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      socket.emit("webrtc:offer", {
-        roomId: roomIdRef.current,
-        toUserId: remoteUserId,
-        fromUserId: authUserId,
-        sdp: offer,
-      });
+      return pc;
     },
-    [socket, authUserId, updateParticipantStream, removeParticipant]
+    [authUserId, updateParticipantStream, removeParticipant]
+  );
+
+  const createOfferForPeer = useCallback(
+    async (remoteUserId: string, remoteName?: string) => {
+      const socket = socketRef.current;
+      const uid = normalizeUserId(remoteUserId);
+      if (!socket || !roomIdRef.current || !uid || uid === authUserId) return;
+      if (!shouldInitiateOffer(authUserId, uid)) return;
+      if (makingOfferRef.current.has(uid)) return;
+
+      makingOfferRef.current.add(uid);
+      if (remoteName) addOrUpdateParticipant(uid, remoteName);
+
+      try {
+        const pc = setupPeerConnection(uid);
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: callTypeRef.current === "video",
+        });
+        await pc.setLocalDescription(offer);
+        socket.emit("webrtc:offer", {
+          roomId: roomIdRef.current,
+          toUserId: uid,
+          fromUserId: authUserId,
+          sdp: offer,
+        });
+      } catch (err) {
+        console.error("createOffer error:", err);
+        makingOfferRef.current.delete(uid);
+      }
+    },
+    [authUserId, setupPeerConnection, addOrUpdateParticipant]
   );
 
   const handleRemoteOffer = useCallback(
-    async (fromUserId: string, sdp: RTCSessionDescriptionInit) => {
-      if (!socket || !roomIdRef.current || fromUserId === authUserId) return;
+    async (fromUserId: string, sdp: RTCSessionDescriptionInit, callerName?: string) => {
+      const socket = socketRef.current;
+      const uid = normalizeUserId(fromUserId);
+      if (!socket || !roomIdRef.current || !uid || uid === authUserId) return;
 
-      let pc = peerConnectionsRef.current.get(fromUserId);
-      if (!pc) {
-        pc = createPeerConnection();
-        peerConnectionsRef.current.set(fromUserId, pc);
+      if (callerName) addOrUpdateParticipant(uid, callerName);
 
-        const stream = localStreamRef.current;
-        if (stream) {
-          stream.getTracks().forEach((track) => pc!.addTrack(track, stream));
+      const pc = setupPeerConnection(uid);
+
+      try {
+        if (pc.signalingState === "have-local-offer") {
+          await pc.setLocalDescription({ type: "rollback" } as RTCSessionDescriptionInit);
         }
 
-        pc.ontrack = (event) => {
-          const [remoteStream] = event.streams;
-          if (remoteStream) updateParticipantStream(fromUserId, remoteStream);
-        };
+        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        await flushPendingCandidates(uid, pc);
 
-        pc.onicecandidate = (event) => {
-          if (event.candidate) {
-            socket.emit("webrtc:ice-candidate", {
-              roomId: roomIdRef.current,
-              toUserId: fromUserId,
-              fromUserId: authUserId,
-              candidate: event.candidate,
-            });
-          }
-        };
-
-        pc.onconnectionstatechange = () => {
-          if (pc!.connectionState === "disconnected" || pc!.connectionState === "failed") {
-            removeParticipant(fromUserId);
-          }
-        };
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit("webrtc:answer", {
+          roomId: roomIdRef.current,
+          toUserId: uid,
+          fromUserId: authUserId,
+          sdp: answer,
+        });
+      } catch (err) {
+        console.error("handleRemoteOffer error:", err);
       }
-
-      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-      await flushPendingCandidates(fromUserId, pc);
-
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      socket.emit("webrtc:answer", {
-        roomId: roomIdRef.current,
-        toUserId: fromUserId,
-        fromUserId: authUserId,
-        sdp: answer,
-      });
     },
-    [socket, authUserId, updateParticipantStream, removeParticipant, flushPendingCandidates]
+    [authUserId, setupPeerConnection, addOrUpdateParticipant, flushPendingCandidates]
   );
 
   const handleRemoteAnswer = useCallback(
     async (fromUserId: string, sdp: RTCSessionDescriptionInit) => {
-      const pc = peerConnectionsRef.current.get(fromUserId);
+      const uid = normalizeUserId(fromUserId);
+      const pc = peerConnectionsRef.current.get(uid);
       if (!pc) return;
-      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-      await flushPendingCandidates(fromUserId, pc);
-      setStatus("connected");
-      setStatusMessage("Connected");
+
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        await flushPendingCandidates(uid, pc);
+        makingOfferRef.current.delete(uid);
+        setStatus("connected");
+        statusRef.current = "connected";
+        setStatusMessage("Connected");
+      } catch (err) {
+        console.error("handleRemoteAnswer error:", err);
+      }
     },
     [flushPendingCandidates]
+  );
+
+  const negotiateWithPeers = useCallback(
+    async (list: { userId: string; name: string }[], onlyNewUserId?: string) => {
+      for (const p of list) {
+        const uid = normalizeUserId(p.userId);
+        if (!uid || uid === authUserId) continue;
+        if (onlyNewUserId && uid !== normalizeUserId(onlyNewUserId)) continue;
+
+        addOrUpdateParticipant(uid, p.name);
+
+        if (shouldInitiateOffer(authUserId, uid)) {
+          await createOfferForPeer(uid, p.name);
+        }
+      }
+    },
+    [authUserId, addOrUpdateParticipant, createOfferForPeer]
   );
 
   const setupLocalStream = useCallback(async (withVideo: boolean) => {
@@ -294,6 +353,11 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
       setLocalStream(stream);
       setIsVideoOff(!withVideo);
       addOrUpdateParticipant(authUserId, authUserName, stream);
+
+      peerConnectionsRef.current.forEach((pc) => {
+        attachLocalTracks(pc, stream);
+      });
+
       return stream;
     } catch (err) {
       const msg = getMediaErrorMessage(err);
@@ -305,32 +369,28 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
     }
   }, [authUserId, authUserName, addOrUpdateParticipant]);
 
-  const connectToExistingParticipants = useCallback(
-    async (list: { userId: string; name: string }[]) => {
-      for (const p of list) {
-        if (p.userId !== authUserId) {
-          addOrUpdateParticipant(p.userId, p.name);
-          await createOfferForPeer(p.userId);
-        }
-      }
-    },
-    [authUserId, addOrUpdateParticipant, createOfferForPeer]
-  );
-
   const endCall = useCallback(() => {
-    if (socket && roomIdRef.current) {
-      socket.emit("call:end", { roomId: roomIdRef.current, userName: authUserName });
+    if (socketRef.current && roomIdRef.current) {
+      socketRef.current.emit("call:end", { roomId: roomIdRef.current, userName: authUserName });
     }
     setStatus("ended");
     setStatusMessage("Call ended");
-    setTimeout(resetCall, 800);
-  }, [socket, authUserName, resetCall]);
+    setTimeout(resetCall, 600);
+  }, [authUserName, resetCall]);
 
   const startCall = useCallback(
-    async (conversation: any, type: CallType, displayName: string) => {
-      if (!socket || !authUserId) return;
+    async (conversation: { _id?: unknown; participants?: unknown[] }, type: CallType, displayName: string) => {
+      const socket = socketRef.current;
+      if (!socket || !authUserId) {
+        toast.error("Not connected");
+        return;
+      }
+      if (statusRef.current !== "idle") {
+        toast.error("Already in a call");
+        return;
+      }
 
-      const convId = String(conversation._id);
+      const convId = normalizeUserId(conversation._id);
       const participantIds = getParticipantIds(conversation, authUserId);
       if (participantIds.length === 0) {
         toast.error("No participants to call");
@@ -339,13 +399,13 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
 
       const newRoomId = generateRoomId(convId);
       roomIdRef.current = newRoomId;
-      isCallerRef.current = true;
+      callTypeRef.current = type;
 
       setRoomId(newRoomId);
-      setConversationId(convId);
       setConversationName(displayName);
       setCallType(type);
       setStatus("calling");
+      statusRef.current = "calling";
       setStatusMessage("Calling...");
       setIsIncoming(false);
 
@@ -356,7 +416,7 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
         return;
       }
 
-      const allParticipants = [authUserId, ...participantIds];
+      const allParticipants = [authUserId, ...participantIds.map(normalizeUserId)];
       socket.emit("call:invite", {
         roomId: newRoomId,
         conversationId: convId,
@@ -365,24 +425,28 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
         callerName: authUserName,
       });
     },
-    [socket, authUserId, authUserName, setupLocalStream, resetCall]
+    [authUserId, authUserName, setupLocalStream, resetCall]
   );
 
   const acceptCall = useCallback(async () => {
-    if (!socket || !incomingCall || !authUserId) return;
+    const socket = socketRef.current;
+    const call = incomingCall;
+    if (!socket || !call || !authUserId) return;
 
-    const { roomId: rId, callType: type, callerId, callerName } = incomingCall;
+    const rId = call.roomId;
+    const type = call.callType;
     roomIdRef.current = rId;
+    callTypeRef.current = type;
+
     setRoomId(rId);
-    setConversationId(incomingCall.conversationId);
     setCallType(type);
     setStatus("connected");
-    setStatusMessage("Connected");
+    statusRef.current = "connected";
+    setStatusMessage("Connecting...");
     setIsIncoming(false);
     setIncomingCall(null);
-    isCallerRef.current = false;
 
-    addOrUpdateParticipant(callerId, callerName);
+    addOrUpdateParticipant(normalizeUserId(call.callerId), call.callerName);
 
     try {
       await setupLocalStream(type === "video");
@@ -393,29 +457,30 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
     }
 
     socket.emit("call:accept", { roomId: rId, userName: authUserName });
-  }, [socket, incomingCall, authUserId, authUserName, setupLocalStream, resetCall, addOrUpdateParticipant]);
+  }, [incomingCall, authUserId, authUserName, setupLocalStream, resetCall, addOrUpdateParticipant]);
 
   const rejectCall = useCallback(() => {
-    if (socket && incomingCall) {
-      socket.emit("call:reject", {
-        roomId: incomingCall.roomId,
-        userName: authUserName,
-      });
+    const socket = socketRef.current;
+    const call = incomingCall;
+    if (socket && call) {
+      socket.emit("call:reject", { roomId: call.roomId, userName: authUserName });
     }
-    setStatusMessage("Call declined");
     resetCall();
-  }, [socket, incomingCall, authUserName, resetCall]);
+  }, [incomingCall, authUserName, resetCall]);
 
   const joinRoom = useCallback(
     async (rId: string, convId: string, type: CallType, displayName: string) => {
+      const socket = socketRef.current;
       if (!socket || !authUserId) return;
+
       roomIdRef.current = rId;
+      callTypeRef.current = type;
       setRoomId(rId);
-      setConversationId(convId);
       setConversationName(displayName);
       setCallType(type);
       setStatus("connected");
-      setStatusMessage("Joining room...");
+      statusRef.current = "connected";
+      setStatusMessage("Joining...");
 
       try {
         await setupLocalStream(type === "video");
@@ -431,15 +496,14 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
         callType: type,
       });
     },
-    [socket, authUserId, authUserName, setupLocalStream, resetCall]
+    [authUserId, authUserName, setupLocalStream, resetCall]
   );
 
   const toggleMute = useCallback(() => {
     const stream = localStreamRef.current;
     if (!stream) return;
-    const audioTracks = stream.getAudioTracks();
     const next = !isMuted;
-    audioTracks.forEach((t) => (t.enabled = !next));
+    stream.getAudioTracks().forEach((t) => (t.enabled = !next));
     setIsMuted(next);
     setParticipants((prev) =>
       prev.map((p) => (p.userId === authUserId ? { ...p, isMuted: next } : p))
@@ -449,18 +513,15 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
   const toggleVideo = useCallback(() => {
     const stream = localStreamRef.current;
     if (!stream) return;
-    const videoTracks = stream.getVideoTracks();
     const next = !isVideoOff;
-    videoTracks.forEach((t) => (t.enabled = !next));
+    stream.getVideoTracks().forEach((t) => (t.enabled = !next));
     setIsVideoOff(next);
     setParticipants((prev) =>
       prev.map((p) => (p.userId === authUserId ? { ...p, isVideoOff: next } : p))
     );
   }, [isVideoOff, authUserId]);
 
-  const toggleSpeaker = useCallback(() => {
-    setIsSpeakerOn((prev) => !prev);
-  }, []);
+  const toggleSpeaker = useCallback(() => setIsSpeakerOn((p) => !p), []);
 
   const toggleScreenShare = useCallback(async () => {
     if (isScreenSharing) {
@@ -469,11 +530,10 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
       if (cameraStreamRef.current) {
         localStreamRef.current = cameraStreamRef.current;
         setLocalStream(cameraStreamRef.current);
+        const camTrack = cameraStreamRef.current.getVideoTracks()[0];
         peerConnectionsRef.current.forEach((pc) => {
-          const senders = pc.getSenders();
-          const videoSender = senders.find((s) => s.track?.kind === "video");
-          const camTrack = cameraStreamRef.current?.getVideoTracks()[0];
-          if (videoSender && camTrack) videoSender.replaceTrack(camTrack);
+          const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+          if (sender && camTrack) sender.replaceTrack(camTrack);
         });
       }
       setIsScreenSharing(false);
@@ -495,7 +555,7 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
         if (sender && screenTrack) sender.replaceTrack(screenTrack);
       });
     } catch {
-      toast.error("Screen sharing cancelled or not supported");
+      toast.error("Screen sharing cancelled");
     }
   }, [isScreenSharing]);
 
@@ -503,12 +563,19 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
     if (!socket || !authUserId) return;
 
     const onIncoming = (payload: IncomingCallPayload) => {
-      if (status !== "idle" && roomIdRef.current) return;
-      setIncomingCall(payload);
+      if (statusRef.current !== "idle") return;
+
+      setIncomingCall({
+        ...payload,
+        callerId: normalizeUserId(payload.callerId),
+        participants: payload.participants.map(normalizeUserId),
+      });
       setIsIncoming(true);
       setStatus("ringing");
+      statusRef.current = "ringing";
       setStatusMessage("Ringing...");
       setCallType(payload.callType);
+      callTypeRef.current = payload.callType;
       setConversationName(payload.callerName);
       setRoomId(payload.roomId);
       roomIdRef.current = payload.roomId;
@@ -523,42 +590,33 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
       userName: string;
       participants: { userId: string; name: string }[];
     }) => {
-      if (userId === authUserId) return;
+      const uid = normalizeUserId(userId);
+      if (!uid || uid === authUserId) return;
 
-      addOrUpdateParticipant(userId, userName);
       setStatus("connected");
+      statusRef.current = "connected";
       setStatusMessage(`${userName} joined`);
 
-      if (isCallerRef.current || status === "connected" || status === "calling") {
-        await createOfferForPeer(userId);
-      }
-
-      list.forEach((p) => {
-        if (p.userId !== authUserId && p.userId !== userId) {
-          addOrUpdateParticipant(p.userId, p.name);
-        }
-      });
+      await negotiateWithPeers(list, uid);
     };
 
-    const onUserLeft = ({
-      userId,
-      userName,
-    }: {
-      userId: string;
-      userName: string;
-    }) => {
+    const onUserLeft = ({ userId, userName }: { userId: string; userName: string }) => {
       removeParticipant(userId);
-      setStatusMessage(`${userName} left`);
+      setStatusMessage(`${userName || "User"} left`);
     };
 
-    const onCallEnded = () => {
-      setStatusMessage("Call ended");
+    const onCallEnded = (payload?: { reason?: string }) => {
+      if (payload?.reason === "room_not_found") {
+        toast.error("Call is no longer available");
+      } else {
+        toast.info("Call ended");
+      }
       resetCall();
     };
 
     const onRejected = () => {
-      setStatusMessage("Call declined");
       toast.info("Call declined");
+      setStatusMessage("Call declined");
       resetCall();
     };
 
@@ -568,8 +626,9 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
       participants: { userId: string; name: string }[];
     }) => {
       setStatus("connected");
+      statusRef.current = "connected";
       setStatusMessage("Connected");
-      await connectToExistingParticipants(list);
+      await negotiateWithPeers(list);
     };
 
     const onJoined = async ({
@@ -578,8 +637,9 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
       participants: { userId: string; name: string }[];
     }) => {
       setStatus("connected");
+      statusRef.current = "connected";
       setStatusMessage("Connected");
-      await connectToExistingParticipants(list);
+      await negotiateWithPeers(list);
     };
 
     const onOffer = async ({
@@ -589,10 +649,7 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
       fromUserId: string;
       sdp: RTCSessionDescriptionInit;
     }) => {
-      addOrUpdateParticipant(fromUserId, "Participant");
       await handleRemoteOffer(fromUserId, sdp);
-      setStatus("connected");
-      setStatusMessage("Connected");
     };
 
     const onAnswer = async ({
@@ -610,15 +667,21 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
       candidate,
     }: {
       fromUserId: string;
-      candidate: RTCIceCandidateInit;
+      candidate: RTCIceCandidateInit | null;
     }) => {
-      const pc = peerConnectionsRef.current.get(fromUserId);
+      if (!candidate) return;
+      const uid = normalizeUserId(fromUserId);
+      const pc = peerConnectionsRef.current.get(uid);
       if (pc && pc.remoteDescription) {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (e) {
+          console.warn("addIceCandidate:", e);
+        }
       } else {
-        const pending = pendingCandidatesRef.current.get(fromUserId) || [];
+        const pending = pendingCandidatesRef.current.get(uid) || [];
         pending.push(candidate);
-        pendingCandidatesRef.current.set(fromUserId, pending);
+        pendingCandidatesRef.current.set(uid, pending);
       }
     };
 
@@ -648,15 +711,10 @@ export const CallProvider = ({ children }: { children: ReactNode }) => {
   }, [
     socket,
     authUserId,
-    status,
-    participants.length,
-    addOrUpdateParticipant,
-    removeParticipant,
-    createOfferForPeer,
+    negotiateWithPeers,
     handleRemoteOffer,
     handleRemoteAnswer,
-    connectToExistingParticipants,
-    endCall,
+    removeParticipant,
     resetCall,
   ]);
 

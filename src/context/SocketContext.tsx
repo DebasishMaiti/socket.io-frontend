@@ -32,7 +32,7 @@ export const SocketContextProvider = ({ children }: { children: ReactNode }) => 
     if (authUser) {
       const socket = io(baseUrl, {
         query: {
-          userId: authUser._id,
+          userId: String(authUser._id),
         },
         withCredentials: true,
         transports: ["websocket", "polling"],

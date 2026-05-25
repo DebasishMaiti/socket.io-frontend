@@ -10,6 +10,7 @@ import { useSelector } from "react-redux";
 import { RootState } from "@/store/store";
 import { selectConversationDisplayInfo } from "@/store/chatSlice";
 import { useCallContext } from "@/context/CallContext";
+import { normalizeUserId } from "@/lib/webrtc";
 import { toast } from "sonner";
 
 const MessageContainer = () => {
@@ -36,8 +37,12 @@ const MessageContainer = () => {
 
   const { displayName, displayPic, otherUser, isGroup } = displayInfo;
 
-  const targetIdForOnline = isGroup ? null : (otherUser?._id || selectedConversation?._id);
-  const isOnline = !isGroup && targetIdForOnline && onlineUsers.includes(String(targetIdForOnline));
+  const targetIdForOnline = isGroup
+    ? null
+    : normalizeUserId(otherUser?._id || selectedConversation?._id);
+  const onlineIds = onlineUsers.map(normalizeUserId);
+  const isOnline =
+    !isGroup && targetIdForOnline && onlineIds.includes(targetIdForOnline);
 
   const handleStartCall = (type: "audio" | "video") => {
     if (callStatus !== "idle") {
@@ -45,8 +50,7 @@ const MessageContainer = () => {
       return;
     }
     if (!isGroup && !isOnline) {
-      toast.error("User is offline");
-      return;
+      toast.warning("User appears offline — they may not receive the call");
     }
     startCall(selectedConversation, type, displayName || "Call");
   };
