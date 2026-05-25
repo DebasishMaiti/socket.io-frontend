@@ -8,6 +8,7 @@ import { Toaster } from "sonner";
 import { useSelector } from "react-redux";
 import { RootState } from "@/store/store";
 import useListenMessages from "@/hooks/useListenMessages";
+import CallOverlay from "@/components/call/CallOverlay";
 
 function App() {
   const { chatUser: authUser } = useSelector((state: RootState) => state.auth);
@@ -23,6 +24,7 @@ function App() {
           <Route path='/signup' element={authUser ? <Navigate to='/' /> : <SignUp />} />
         </Routes>
       </div>
+      <CallOverlay />
       <Toaster richColors position="top-center" />
     </div>
   );

@@ -4,6 +4,7 @@ import App from "@/App";
 import "./index.css";
 import { BrowserRouter } from "react-router-dom";
 import { SocketContextProvider } from "@/context/SocketContext";
+import { CallProvider } from "@/context/CallContext";
 
 import { Provider } from "react-redux";
 import { store } from "@/store/store";
@@ -13,7 +14,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <Provider store={store}>
       <BrowserRouter>
         <SocketContextProvider>
-          <App />
+          <CallProvider>
+            <App />
+          </CallProvider>
         </SocketContextProvider>
       </BrowserRouter>
     </Provider>

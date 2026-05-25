@@ -9,6 +9,8 @@ import UserInfo from "./UserInfo";
 import { useSelector } from "react-redux";
 import { RootState } from "@/store/store";
 import { selectConversationDisplayInfo } from "@/store/chatSlice";
+import { useCallContext } from "@/context/CallContext";
+import { toast } from "sonner";
 
 const MessageContainer = () => {
   const [showGroupInfo, setShowGroupInfo] = useState(false);
@@ -16,6 +18,7 @@ const MessageContainer = () => {
   const { chatUser: authUser } = useSelector((state: RootState) => state.auth);
   const { selectedConversation, setSelectedConversation } = useConversation();
   const { onlineUsers } = useSocketContext();
+  const { startCall, status: callStatus } = useCallContext();
   const displayInfo = useSelector(selectConversationDisplayInfo);
 
   useEffect(() => {
@@ -35,6 +38,18 @@ const MessageContainer = () => {
 
   const targetIdForOnline = isGroup ? null : (otherUser?._id || selectedConversation?._id);
   const isOnline = !isGroup && targetIdForOnline && onlineUsers.includes(String(targetIdForOnline));
+
+  const handleStartCall = (type: "audio" | "video") => {
+    if (callStatus !== "idle") {
+      toast.error("You are already in a call");
+      return;
+    }
+    if (!isGroup && !isOnline) {
+      toast.error("User is offline");
+      return;
+    }
+    startCall(selectedConversation, type, displayName || "Call");
+  };
 
   if (showGroupInfo && isGroup) {
     return <GroupInfo onBack={() => setShowGroupInfo(false)} />;
@@ -81,8 +96,20 @@ const MessageContainer = () => {
           </div>
 
           <div className="flex gap-4 text-gray-400">
-            <button className="hover:text-white transition-colors"><Phone size={20} /></button>
-            <button className="hover:text-white transition-colors"><Video size={20} /></button>
+            <button
+              onClick={() => handleStartCall("audio")}
+              className="hover:text-white transition-colors"
+              title="Audio call"
+            >
+              <Phone size={20} />
+            </button>
+            <button
+              onClick={() => handleStartCall("video")}
+              className="hover:text-white transition-colors"
+              title="Video call"
+            >
+              <Video size={20} />
+            </button>
             <button
               onClick={() => {
                 if (isGroup) setShowGroupInfo(true);
