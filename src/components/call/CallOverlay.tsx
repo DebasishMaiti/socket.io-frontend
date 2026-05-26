@@ -4,6 +4,13 @@ import { useSelector } from "react-redux";
 import { RootState } from "@/store/store";
 import { normalizeUserId } from "@/lib/webrtc";
 import {
+  getRemoteGridClass,
+  getRemoteGridStyle,
+  isSingleRemoteLayout,
+} from "@/lib/callLayout";
+import DraggableLocalPreview from "@/components/call/DraggableLocalPreview";
+import RemoteParticipantTile from "@/components/call/RemoteParticipantTile";
+import {
   Mic,
   MicOff,
   Video,
@@ -53,6 +60,7 @@ const CallOverlay = () => {
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteMediaRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const videoAreaRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const el = localVideoRef.current;
@@ -76,13 +84,17 @@ const CallOverlay = () => {
   if (status === "idle") return null;
 
   const remoteParticipants = participants.filter((p) => p.userId !== authUserId);
-  const showLocalVideo = callType === "video" && localStream && !isVideoOff;
-  const gridCols =
-    remoteParticipants.length <= 1
-      ? "grid-cols-1"
-      : remoteParticipants.length <= 4
-        ? "grid-cols-2"
-        : "grid-cols-3";
+  const remoteCount = remoteParticipants.length;
+  const singleRemote = isSingleRemoteLayout(remoteCount);
+  const showLocalPip = callType === "video" && localStream;
+  const showLocalVideo = showLocalPip && !isVideoOff;
+  const gridClass = getRemoteGridClass(remoteCount);
+  const gridStyle = getRemoteGridStyle(remoteCount);
+
+  const setRemoteVideoRef = (userId: string) => (el: HTMLVideoElement | null) => {
+    if (el) remoteMediaRefs.current.set(userId, el);
+    else remoteMediaRefs.current.delete(userId);
+  };
 
   if (isIncoming && status === "ringing") {
     return (
@@ -132,17 +144,20 @@ const CallOverlay = () => {
           </p>
         </div>
         <span className="text-xs px-2 py-1 rounded-full bg-white/10 text-gray-300">
-          {remoteParticipants.length + 1} in call
+          {remoteCount + 1} in call
         </span>
       </div>
 
       {permissionError && (
-        <div className="mx-4 mt-3 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm">
+        <div className="mx-4 mt-3 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-sm shrink-0">
           {permissionError}
         </div>
       )}
 
-      <div className="flex-1 relative p-4 overflow-hidden min-h-0">
+      <div
+        ref={videoAreaRef}
+        className="flex-1 relative overflow-hidden min-h-0 bg-black"
+      >
         {isLoadingMedia && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-10">
             <Loader2 className="animate-spin text-blue-500" size={48} />
@@ -150,66 +165,42 @@ const CallOverlay = () => {
           </div>
         )}
 
-        <div className={`h-full grid ${gridCols} gap-3`}>
-          {remoteParticipants.length === 0 && (status === "calling" || status === "connected") && (
-            <div className="col-span-full flex flex-col items-center justify-center text-gray-400 min-h-[200px]">
-              <Loader2 className="animate-spin mb-3" size={32} />
-              <p>{status === "calling" ? "Calling..." : "Waiting for others..."}</p>
-            </div>
-          )}
-
-          {remoteParticipants.map((p) => (
-            <div
-              key={p.userId}
-              className="relative rounded-xl overflow-hidden bg-[#1a1a1a] border border-white/10 min-h-[160px] aspect-video"
-            >
-              {p.stream ? (
-                <video
-                  ref={(el) => {
-                    if (el) remoteMediaRefs.current.set(p.userId, el);
-                  }}
-                  autoPlay
-                  playsInline
-                  className="w-full h-full object-cover bg-black"
-                />
-              ) : (
-                <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-blue-900/40 to-purple-900/40 min-h-[160px]">
-                  <div className="w-16 h-16 rounded-full bg-white/10 flex items-center justify-center text-2xl font-bold text-white">
-                    {p.name?.charAt(0).toUpperCase() || "?"}
-                  </div>
-                </div>
-              )}
-              <div className="absolute bottom-0 left-0 right-0 px-3 py-2 bg-gradient-to-t from-black/80 to-transparent">
-                <p className="text-white text-sm font-medium truncate">{p.name}</p>
-                {p.isMuted && <span className="text-[10px] text-red-400">Muted</span>}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="absolute bottom-4 right-4 w-36 sm:w-48 aspect-video rounded-xl overflow-hidden border-2 border-white/20 shadow-2xl bg-[#1a1a1a] z-20">
-          {showLocalVideo ? (
-            <video
-              ref={localVideoRef}
-              autoPlay
-              playsInline
-              muted
-              className="w-full h-full object-cover mirror"
-            />
-          ) : (
-            <div className="w-full h-full flex flex-col items-center justify-center bg-[#252525] gap-2">
-              <span className="text-lg font-bold text-white">
-                {authUser?.name?.charAt(0).toUpperCase() || "You"}
-              </span>
-              {localStream && (
-                <span className="text-[10px] text-gray-400">Audio only</span>
-              )}
-            </div>
-          )}
-          <div className="absolute bottom-0 left-0 right-0 px-2 py-1 bg-black/60">
-            <p className="text-white text-xs truncate">{authUser?.name || "You"} (You)</p>
+        {remoteCount === 0 && (status === "calling" || status === "connected") && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-400">
+            <Loader2 className="animate-spin mb-3" size={32} />
+            <p>{status === "calling" ? "Calling..." : "Waiting for others..."}</p>
           </div>
-        </div>
+        )}
+
+        {singleRemote && remoteParticipants[0] && (
+          <RemoteParticipantTile
+            participant={remoteParticipants[0]}
+            videoRef={setRemoteVideoRef(remoteParticipants[0].userId)}
+            fullscreen
+          />
+        )}
+
+        {!singleRemote && remoteCount > 0 && (
+          <div className={`absolute inset-0 p-3 ${gridClass}`} style={gridStyle}>
+            {remoteParticipants.map((p) => (
+              <RemoteParticipantTile
+                key={p.userId}
+                participant={p}
+                videoRef={setRemoteVideoRef(p.userId)}
+              />
+            ))}
+          </div>
+        )}
+
+        {showLocalPip && (
+          <DraggableLocalPreview
+            boundsRef={videoAreaRef}
+            showVideo={showLocalVideo}
+            localVideoRef={localVideoRef}
+            displayName={authUser?.name || "You"}
+            hasLocalStream={!!localStream}
+          />
+        )}
       </div>
 
       <div className="shrink-0 px-4 py-5 bg-[#1e1e1e] border-t border-white/5">
