@@ -5,7 +5,8 @@ import { loginChatUser } from "@/store/authSlice";
 import { toast } from "sonner";
 import { Link, useNavigate } from "react-router-dom";
 import { Loader2, LogIn, Eye, EyeOff } from "lucide-react";
-
+import PageSeo from "@/components/seo/PageSeo";
+import AppLogo from "@/components/shared/AppLogo";
 
 const Login = () => {
   const [email, setEmail] = useState("");
@@ -27,7 +28,14 @@ const Login = () => {
   };
 
   return (
-    <div className='flex flex-col items-center justify-center w-full max-w-md mx-auto p-4'>
+    <>
+      <PageSeo
+        title="Sign in"
+        description="Sign in to NexTalk to message friends, join group chats, and start audio or video calls."
+        path="/login"
+      />
+      <main className='flex flex-col items-center justify-center w-full max-w-md mx-auto p-4'>
+      <AppLogo size="lg" className="mb-6 justify-center" />
       <div className='w-full p-8 rounded-2xl shadow-2xl bg-white/10 backdrop-blur-lg border border-white/20'>
         <h1 className='text-3xl font-bold text-center text-white mb-8'>
           Welcome <span className='text-blue-400'>Back</span>
@@ -74,7 +82,8 @@ const Login = () => {
           </button>
         </form>
       </div>
-    </div>
+    </main>
+    </>
   );
 };
 export default Login;

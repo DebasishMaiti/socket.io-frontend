@@ -5,6 +5,8 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { Eye, EyeOff, Loader2, UserPlus } from "lucide-react";
+import PageSeo from "@/components/seo/PageSeo";
+import AppLogo from "@/components/shared/AppLogo";
 
 const SignUp = () => {
   const [inputs, setInputs] = useState({
@@ -34,7 +36,14 @@ const SignUp = () => {
   };
 
   return (
-    <div className='flex flex-col items-center justify-center w-full max-w-md mx-auto p-4'>
+    <>
+      <PageSeo
+        title="Create account"
+        description="Create a free NexTalk account for real-time messaging, group chats, voice notes, and calls."
+        path="/signup"
+      />
+      <main className='flex flex-col items-center justify-center w-full max-w-md mx-auto p-4'>
+      <AppLogo size="lg" className="mb-6 justify-center" />
       <div className='w-full p-8 rounded-2xl shadow-2xl bg-white/10 backdrop-blur-lg border border-white/20'>
         <h1 className='text-3xl font-bold text-center text-white mb-8'>
           Create <span className='text-blue-400'>Account</span>
@@ -104,7 +113,8 @@ const SignUp = () => {
           </button>
         </form>
       </div>
-    </div>
+    </main>
+    </>
   );
 };
 export default SignUp;

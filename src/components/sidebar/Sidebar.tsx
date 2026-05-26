@@ -9,6 +9,7 @@ import { RootState } from "@/store/store";
 import CreateGroupModal from "./CreateGroupModal";
 import useGetConversations from "@/hooks/useGetConversations";
 import { baseUrl } from "@/shared/_services/api_service";
+import AppLogo from "@/components/shared/AppLogo";
 
 const Sidebar = () => {
   const { chatUser: authUser } = useSelector((state: RootState) => state.auth);
@@ -23,6 +24,7 @@ const Sidebar = () => {
 
   return (
     <div className='border-r border-white/10 p-4 flex flex-col w-full md:w-80 h-full'>
+      <AppLogo href="/" size="md" className="mb-4 px-1" />
       <SearchInput />
 
       <button

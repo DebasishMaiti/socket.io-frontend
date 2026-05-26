@@ -5,6 +5,7 @@ import useUpdateProfile from "@/hooks/useUpdateProfile";
 import { Camera, ArrowLeft, Loader2, User, LogOut } from "lucide-react";
 import { Link } from "react-router-dom";
 import LogoutButton from "@/components/sidebar/LogoutButton";
+import PageSeo from "@/components/seo/PageSeo";
 import { baseUrl } from "@/shared/_services/api_service";
 
 const Profile = () => {
@@ -40,6 +41,8 @@ const Profile = () => {
     : null);
 
   return (
+    <>
+      <PageSeo title="Profile" path="/profile" noindex />
     <div className="flex flex-col w-full max-w-md mx-auto bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 shadow-2xl overflow-hidden">
       <div className="p-6 border-b border-white/10 flex items-center gap-4">
         <Link to="/" className="text-gray-400 hover:text-white transition-colors">
@@ -127,6 +130,7 @@ const Profile = () => {
         </div>
       </div>
     </div>
+    </>
   );
 };
 

@@ -1,7 +1,8 @@
 import axios from "axios";
 import { authHeader } from "../_helper/auth-header";
 
-export const baseUrl = "https://socket-io-backend-z0wz.onrender.com";
+// export const baseUrl = "https://socket-io-backend-z0wz.onrender.com";
+export const baseUrl = "http://localhost:5000";
 export const rootUrl = `${baseUrl}/api`;
 
 const authUrl = rootUrl + '/auth';

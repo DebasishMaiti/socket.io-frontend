@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import useConversation from "@/hooks/useConversation";
 import MessageInput from "@/components/messages/MessageInput";
 import Messages from "@/components/messages/Messages";
-import { MessageSquare, Video, Phone, Info, ArrowLeft } from "lucide-react";
+import { Video, Phone, Info, ArrowLeft } from "lucide-react";
+import AppLogo from "@/components/shared/AppLogo";
 import { useSocketContext } from "@/context/SocketContext";
 import GroupInfo from "./GroupInfo";
 import UserInfo from "./UserInfo";
@@ -146,9 +147,7 @@ const NoChatSelected = () => {
   return (
     <div className='flex items-center justify-center w-full h-full'>
       <div className='px-4 text-center sm:text-lg md:text-xl text-gray-200 font-semibold flex flex-col items-center gap-4'>
-        <div className="p-6 bg-blue-500/10 rounded-full animate-pulse">
-          <MessageSquare size={64} className="text-blue-500" />
-        </div>
+        <AppLogo size="lg" showName={false} className="justify-center" />
         <div className="space-y-1">
           <p className="text-2xl">Welcome 👋 {authUser?.name} ✨</p>
           <p className="text-gray-400 text-base font-normal">Select a chat to start messaging</p>
